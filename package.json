@@ -1,0 +1,24 @@
+{
+  "name": "toastmasters-club-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop meeting and Pathways workspace for Dongtan Toastmasters",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@fontsource-variable/montserrat": "^5.3.0",
+    "@fontsource-variable/source-sans-3": "^5.3.1",
+    "electron": "^45.2.3",
+    "exceljs": "^4.4.0",
+    "playwright-core": "^1.65.0",
+    "pptxgenjs": "^4.0.1"
+  },
+  "overrides": {
+    "image-size": "2.1.0",
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  }
+}
