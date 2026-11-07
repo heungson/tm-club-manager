@@ -246,17 +246,115 @@ function memberOptions(currentId, currentName = '', role = '') {
   return [['', 'Open'], ...(currentName && !active.some(row => row[0] === currentId) ? [['legacy', currentName + ' (imported)']] : []), ...active];
 }
 
+function clockMinutes(value) {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value || '')) return null;
+  const [hour, minute] = value.split(':').map(Number);
+  return hour * 60 + minute;
+}
+
+function agendaTime(minutes) {
+  if (minutes === null) return 'TBD';
+  const days = Math.floor(minutes / 1440);
+  const hour = String(Math.floor(minutes % 1440 / 60)).padStart(2, '0');
+  const minute = String(minutes % 60).padStart(2, '0');
+  return `${hour}:${minute}${days ? ` (+${days}d)` : ''}`;
+}
+
+function meetingSchedule(meeting) {
+  const start = clockMinutes(meeting.plannedStart);
+  let target = clockMinutes(meeting.targetEnd);
+  if (start !== null && target !== null && target < start) target += 1440;
+  let cursor = start;
+  const slots = new Map();
+  for (const item of meeting.agenda.filter(item => item.included)) {
+    const minutes = /^[1-9]\d{0,2}$/.test(item.plannedMinutes) ? Number(item.plannedMinutes) : null;
+    const end = cursor === null || minutes === null ? null : cursor + minutes;
+    slots.set(item.id, { start: cursor, end });
+    cursor = end;
+  }
+  return { start, end: slots.size ? cursor : null, target, slots };
+}
+
+function scheduleSummary({ start, end, target }) {
+  const parts = [`Planned meeting · ${agendaTime(start)}–${agendaTime(end)} KST`];
+  if (target !== null) parts.push(`Target finish ${agendaTime(target)}`);
+  if (end !== null && target !== null && end > target) parts.push(`${end - target} min over target`);
+  return parts.join(' · ');
+}
+
+function agendaSlot(slot) {
+  return slot ? `${agendaTime(slot.start)}–${agendaTime(slot.end)}` : '';
+}
+
+function updateAgendaTimes() {
+  const schedule = meetingSchedule(draft);
+  root.querySelector('#agenda-timing-summary').textContent = scheduleSummary(schedule);
+  for (const label of root.querySelectorAll('[data-agenda-time]')) {
+    label.textContent = agendaSlot(schedule.slots.get(label.dataset.agendaTime));
+  }
+}
+
+function printedAgenda(meeting) {
+  const schedule = meetingSchedule(meeting);
+  const roles = meeting.roles;
+  const sectionTitle = { welcome: 'Chair calls meeting to order', roles: 'Toastmaster calls on meeting roles',
+    topics: 'Table Topics session', evaluations: 'Evaluation session', awards: 'Awards session' };
+  const segmentLead = { welcome: roles.Chairperson, roles: roles.Toastmaster,
+    word: roles['Word & Quote Master'] || roles.Grammarian, topics: roles.Topicsmaster,
+    evaluations: roles['General Evaluator'], closing: roles.Chairperson };
+  const roleRows = standing.filter(role => !['Chairperson', 'Toastmaster'].includes(role) && roles[role])
+    .map(role => `<tr><td></td><td colspan="4">${escape(role)}</td><td>${escape(roles[role])}</td></tr>`).join('');
+  const items = meeting.agenda.filter(item => item.included);
+  const rows = items.map((item, index) => {
+    const slot = schedule.slots.get(item.id);
+    const time = `<td class="agenda-sheet-slot">${agendaTime(slot.start)}<br>${agendaTime(slot.end)}</td>`;
+    if (item.type === 'speech') {
+      const heading = items[index - 1]?.type === 'speech' ? '' : `<tr class="agenda-sheet-section"><td></td><th colspan="4" scope="colgroup">Prepared speech session</th><td>${escape(roles.Toastmaster)}</td></tr>
+        <tr class="agenda-sheet-labels"><td></td><td>Project</td><td>Speech title</td><td>Speaker</td><td>Time limit</td><td>Evaluator</td></tr>`;
+      return `${heading}<tr>${time}<td>${escape(item.project || '—')}</td><td><strong>${escape(item.title || 'Prepared speech')}</strong></td><td>${escape(item.owner || 'Open')}</td><td>${escape(item.duration || '—')}</td><td>${escape(item.evaluator || 'Open')}</td></tr>`;
+    }
+    const title = item.title || sectionTitle[item.type] || labels[item.type];
+    const lead = item.owner || segmentLead[item.type];
+    return `<tr class="agenda-sheet-section">${time}<th colspan="4" scope="row">${escape(title)}</th><td>${escape(lead || '—')}</td></tr>${item.type === 'roles' ? roleRows : ''}`;
+  }).join('');
+  const info = [
+    ['Meeting no.', meeting.number], ['Date', formatDate(meeting.date)],
+    ['Planned time (KST)', agendaSlot(schedule)],
+    ['Target finish', schedule.target === null ? '' : agendaTime(schedule.target)],
+    ['Venue', meeting.venue], ['Theme', meeting.theme], ['Theme question', meeting.question],
+    ['Word of the day', meeting.word], ['Quote of the day', meeting.quote], ['Special event', meeting.event],
+  ].filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escape(value)}</dd>`).join('');
+  return `<article class="agenda-sheet">
+    <header class="agenda-sheet-brand"><img src="toastmasters-logo.png" alt="Toastmasters International"><h2>Dongtan Toastmasters</h2></header>
+    <div class="agenda-sheet-body">
+      <dl class="agenda-sheet-info">${info}</dl>
+      <div class="agenda-sheet-program">
+        <table aria-label="Meeting schedule">
+          <colgroup><col class="agenda-col-time"><col class="agenda-col-project"><col class="agenda-col-title"><col class="agenda-col-person"><col class="agenda-col-limit"><col class="agenda-col-person"></colgroup>
+          <thead><tr><th scope="col">Start / end</th><th colspan="4" scope="colgroup">Meeting program</th><th scope="col">Role taker</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        ${schedule.end === null ? '<p class="agenda-sheet-note">TBD marks a time that cannot be calculated yet.</p>' : ''}
+      </div>
+    </div>
+  </article>`;
+}
+
 function agendaPage() {
   const item = draft?.agenda.find(entry => entry.id === activeItem);
+  const schedule = meetingSchedule(draft);
+  const workbookAgenda = profile.google.meeting || (profile.agendaWorkbook && draft.printSheet);
   const tools = `${buttons('format', 'Start from format…')}${buttons('add-item', 'Add speech', 'speech', 'primary')}${buttons('segments', 'Add segment…')}`;
+  const printTools = `${buttons('preview-agenda', 'Preview printed agenda…')}${workbookAgenda ? buttons('open-agenda-workbook', 'Open workbook agenda', '', '', 'external') : ''}`;
   let edit = '<div class="empty">Select an agenda item to edit it.</div>';
   if (item) {
     const isSpeech = item.type === 'speech';
     const showsOwner = ['speech', 'debate', 'topics', 'custom'].includes(item.type);
     const ownerRole = isSpeech ? 'Speaker' : item.type === 'debate' ? 'Debate moderator' : labels[item.type];
-    edit = `<div class="panel item-panel" data-item="${escape(item.id)}"><h3>${escape(labels[item.type])}</h3>${input(item.type === 'debate' ? 'Motion' : 'Title', 'title', item.title)}${showsOwner ? select(ownerRole, 'ownerId', memberOptions(item.ownerId, item.owner, ownerRole), item.ownerId || (item.owner ? 'legacy' : '')) : ''}${isSpeech ? select('Evaluator', 'evaluatorId', memberOptions(item.evaluatorId, item.evaluator, 'Evaluator'), item.evaluatorId || (item.evaluator ? 'legacy' : '')) + input('Pathways project', 'project', item.project) : ''}${input('Duration', 'duration', item.duration)}<label>Presenter cue<textarea name="notes" rows="2">${escape(item.notes)}</textarea></label><div class="actions"><div class="actions" role="group" aria-label="Reorder agenda item">${iconButton('move-item', 'Move up', 'up', '-1')}${iconButton('move-item', 'Move down', 'down', '1')}</div>${buttons('skip-item', item.included ? 'Skip segment' : 'Include segment')}${buttons('remove-item', 'Remove…', '', 'danger')}</div></div>`;
+    edit = `<div class="panel item-panel" data-item="${escape(item.id)}"><h3>${escape(labels[item.type])}</h3>${input(item.type === 'debate' ? 'Motion' : 'Title', 'title', item.title)}${showsOwner ? select(ownerRole, 'ownerId', memberOptions(item.ownerId, item.owner, ownerRole), item.ownerId || (item.owner ? 'legacy' : '')) : ''}${isSpeech ? select('Evaluator', 'evaluatorId', memberOptions(item.evaluatorId, item.evaluator, 'Evaluator'), item.evaluatorId || (item.evaluator ? 'legacy' : '')) + input('Pathways project', 'project', item.project) : ''}${input(isSpeech ? 'Speech time limit' : 'Duration note', 'duration', item.duration)}<label>Planned minutes<input type="number" min="1" max="999" step="1" name="plannedMinutes" value="${escape(item.plannedMinutes)}"></label><label>Presenter cue<textarea name="notes" rows="2">${escape(item.notes)}</textarea></label><div class="actions"><div class="actions" role="group" aria-label="Reorder agenda item">${iconButton('move-item', 'Move up', 'up', '-1')}${iconButton('move-item', 'Move down', 'down', '1')}</div>${buttons('skip-item', item.included ? 'Skip segment' : 'Include segment')}${buttons('remove-item', 'Remove…', '', 'danger')}</div></div>`;
   }
-  return `<div class="section-head"><div><h2>Meeting agenda</h2><p>${draft.agenda.filter(entry => entry.included).length} included items${draftChanged ? ' · Unsaved changes' : ''}</p></div><div class="actions">${tools}</div></div><div class="split"><div class="list-panel">${draft.agenda.map((entry, index) => `<button type="button" class="row-button${entry.id === activeItem ? ' current' : ''}" data-action="select-item" data-value="${escape(entry.id)}"><span class="row-count">${String(index + 1).padStart(2, '0')}</span><span><strong>${escape(entry.title || labels[entry.type])}</strong><small>${escape([labels[entry.type], entry.owner, entry.duration, entry.included ? '' : 'Skipped'].filter(Boolean).join(' · '))}</small></span></button>`).join('') || '<div class="empty">Add your first agenda item.</div>'}</div>${edit}</div><div class="form-actions">${buttons('reset-agenda', 'Discard changes')}${buttons('save-meeting', 'Save agenda', '', 'primary')}</div>`;
+  return `<div class="section-head"><div><h2>Meeting agenda</h2><p>${draft.agenda.filter(entry => entry.included).length} included items${draftChanged ? ' · Unsaved changes' : ''}</p></div><div class="actions">${tools}</div></div>
+    <div class="agenda-timing"><p id="agenda-timing-summary">${escape(scheduleSummary(schedule))}</p><div class="actions">${buttons('agenda-times', 'Set meeting times…')}${printTools}</div></div><div class="split"><div class="list-panel">${draft.agenda.map((entry, index) => `<button type="button" class="row-button${entry.id === activeItem ? ' current' : ''}" data-action="select-item" data-value="${escape(entry.id)}"><span class="row-count">${String(index + 1).padStart(2, '0')}</span><span><strong>${escape(entry.title || labels[entry.type])}</strong><small>${escape([labels[entry.type], entry.owner, entry.duration, entry.included ? '' : 'Skipped'].filter(Boolean).join(' · '))}</small><small class="agenda-slot" data-agenda-time="${escape(entry.id)}">${agendaSlot(schedule.slots.get(entry.id))}</small></span></button>`).join('') || '<div class="empty">Add your first agenda item.</div>'}</div>${edit}</div><div class="form-actions">${buttons('reset-agenda', 'Discard changes')}${buttons('save-meeting', 'Save agenda', '', 'primary')}</div>`;
 }
 
 function rolesPage() {
@@ -660,6 +758,35 @@ async function action(name, value) {
     case 'segments': showDialog('Add agenda segment', select('Segment', 'segment', Object.entries(labels).filter(([key]) => key !== 'speech'), 'debate'), 'Add segment', form => action('add-item', form.segment)); break;
     case 'add-item': { const item = await invoke('agenda:item', value); draft.agenda.push(item); activeItem = item.id; draftChanged = true; render(); break; }
     case 'select-item': activeItem = value; render(); break;
+    case 'open-agenda-workbook': {
+      const sheet = await invoke('agenda:open-workbook', meetingId);
+      if (!profile.google.meeting) message(`Select the “${sheet}” tab in the workbook to print.`);
+      break;
+    }
+    case 'agenda-times':
+      showDialog('Set meeting times', `<p>Use Korea Standard Time. The finish time is a target for the planned agenda.</p>${input('Planned start', 'plannedStart', draft.plannedStart, 'time')}${input('Target finish', 'targetEnd', draft.targetEnd, 'time')}`, 'Apply times', times => {
+        if (times.plannedStart === (draft.plannedStart || '') && times.targetEnd === (draft.targetEnd || '')) return;
+        Object.assign(draft, times);
+        draftChanged = true;
+        render();
+      });
+      break;
+    case 'preview-agenda': {
+      const meeting = draft;
+      if (/no\s+meeting|^holiday$/i.test(meeting.event) || !meeting.agenda.some(item => item.included)) {
+        throw new Error('There are no scheduled segments to print.');
+      }
+      const status = draftChanged ? '<p class="agenda-preview-note">This preview includes unsaved agenda changes.</p>' : '';
+      showDialog('Printed agenda', status + printedAgenda(meeting), 'Print…', async () => {
+        const print = document.createElement('div');
+        print.id = 'agenda-print';
+        print.append(dialog.querySelector('.agenda-sheet').cloneNode(true));
+        document.body.append(print);
+        try { await invoke('agenda:print'); }
+        finally { print.remove(); }
+      });
+      break;
+    }
     case 'skip-item': editItem().included = !editItem().included; draftChanged = true; render(); break;
     case 'move-item': {
       const index = draft.agenda.findIndex(item => item.id === activeItem);
@@ -794,6 +921,7 @@ if (new URLSearchParams(location.search).has('projection')) {
       }
       item[target.name] = target.value;
       draftChanged = true;
+      if (target.name === 'plannedMinutes') updateAgendaTimes();
     }
     if (target.name === 'message') sendText = target.value;
     if (target.id === 'project-name') project = target.value;

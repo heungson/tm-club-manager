@@ -95,6 +95,14 @@ A regular meeting can have two speeches and Table Topics. A debate meeting can h
 
 In the native meeting spreadsheet, an `Agenda Items` tab has one row per item with `meeting_id`, `item_id`, `position`, `type`, `included`, and the item's details. The app can seed an older meeting from its existing `26_Roles` speech fields. Once an agenda is saved, speech and segment details come from `Agenda Items`. `26_Roles` continues to supply meeting details and standing roles. Stable item IDs keep slide images and evaluator pairings attached when items move.
 
+### Print the planned schedule
+
+In **Meetings → Agenda**, use **Set meeting times…** to enter the planned start and target finish in KST. Set **Planned minutes** for each included segment. The app adds those minutes in agenda order and shows the projected finish and any overrun. The speech time limit remains a separate field. For a 5–7 minute speech, a nine-minute segment can leave room for the introduction and written feedback.
+
+Choose **Open workbook agenda** to use the club’s existing A4 format. The app opens the dated agenda tab in a connected workbook when one matches the meeting, or opens **Agenda Template**. For an imported Excel workbook, it opens the original file and shows which tab to select. The existing template uses its own time cells and formulas.
+
+Choose **Preview printed agenda…** for the app’s A4 handout. It follows the club workbook’s two-column layout, with the meeting details on the left and the program on the right. It shows the current selections, including unsaved edits, with start and end times, role takers, and each speech’s project, title, time limit, speaker, and evaluator. Skipped segments stay off the handout and missing times appear as **TBD**. In a connected workbook, the `Meeting Schedule` tab stores app timing by meeting and item ID.
+
 ### Assign role takers for the next meeting
 
 *Officer view*

@@ -137,21 +137,48 @@ handle('meeting:new', ({ date, number, theme }) => {
 handle('meeting:save', async next => {
   const previous = meeting(next.id);
   if (!Array.isArray(next.agenda) || next.agenda.some(item => !labels[item.type])) throw new Error('The agenda has an invalid item.');
+  const plannedStart = next.plannedStart || '';
+  const targetEnd = next.targetEnd || '';
+  if ([plannedStart, targetEnd].some(time => time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new Error('Enter a valid start or finish time.');
   function check(role, id, oldId) {
     if (id && id !== oldId && !eligible(data.roster, data.authority, role, id)) throw new Error(`The selected member is ineligible for ${role}.`);
   }
   for (const [role, id] of Object.entries(next.roleIds)) check(role, id, previous.roleIds[role]);
   for (const item of next.agenda) {
+    if (item.plannedMinutes != null && item.plannedMinutes !== '' && !/^([1-9]\d{0,2})$/.test(item.plannedMinutes)) {
+      throw new Error('Enter a whole number from 1 to 999 for each time budget.');
+    }
     const before = previous.agenda.find(entry => entry.id === item.id);
     check(item.type === 'speech' ? 'Speaker' : item.type === 'debate' ? 'Debate moderator' : labels[item.type], item.ownerId, before?.ownerId);
     check('Evaluator', item.evaluatorId, before?.evaluatorId);
   }
-  const agendaSignature = data.google.meeting && previous.tab ? await google.saveMeeting(data.google.meeting, previous, next) : undefined;
-  data.meetings = data.meetings.map(item => item.id === previous.id ? { ...previous, agenda: next.agenda, roles: next.roles, roleIds: next.roleIds, agendaSignature } : item);
+  const signatures = data.google.meeting && previous.tab ? await google.saveMeeting(data.google.meeting, previous, next) : {};
+  const updated = { ...previous, agenda: next.agenda, roles: next.roles, roleIds: next.roleIds, plannedStart, targetEnd, ...signatures };
+  data.meetings = data.meetings.map(item => item.id === previous.id ? updated : item);
   persist(); return profile();
 }, true);
 handle('meeting:preview', id => snapshot(id));
 handle('meeting:export', exportDeck);
+handle('agenda:print', () => new Promise((resolve, reject) => {
+  window.webContents.print({ pageSize: 'A4', printBackground: true }, (success, reason) => {
+    if (success || reason === 'Print job canceled') resolve(success);
+    else reject(new Error(reason || 'The agenda could not be printed.'));
+  });
+}));
+handle('agenda:open-workbook', async id => {
+  const selected = meeting(id);
+  const file = data.google.meeting;
+  if (file) {
+    const tab = await google.agendaTab(file, selected.date);
+    if (!tab) throw new Error('This workbook has no agenda tab for this date and no Agenda Template tab.');
+    await shell.openExternal(`https://docs.google.com/spreadsheets/d/${encodeURIComponent(file.id)}/edit#gid=${tab.sheetId}`);
+    return tab.title;
+  }
+  if (!data.agendaWorkbook || !selected.printSheet) throw new Error('Import the workbook that contains the agenda template.');
+  const error = await shell.openPath(data.agendaWorkbook);
+  if (error) throw new Error('The workbook could not be opened. Import it again if it moved.');
+  return selected.printSheet;
+});
 handle('workbook:import', async () => {
   const { filePaths } = await dialog.showOpenDialog(window, { filters: [{ name: 'Excel workbook', extensions: ['xlsx'] }], properties: ['openFile'] });
   if (!filePaths.length) return null;
@@ -166,11 +193,15 @@ handle('workbook:import', async () => {
     return fromRoleGrid(grid, tab.name, `xlsx-${path.basename(filename)}`);
   });
   if (!imported.length) throw new Error('The workbook did not contain a supported yearly roles tab.');
+  for (const item of imported) {
+    item.printSheet = (book.getWorksheet(item.date) || book.getWorksheet('Agenda Template'))?.name;
+  }
   if (data.source === 'Sample club' && !data.google.roster) data.roster = data.roster.filter(item => !item.id.startsWith('demo-'));
   data.meetings = imported;
   const authority = book.worksheets.filter(tab => /^\d{2}_Authority$/.test(tab.name)).at(-1);
   data.authority = authority ? fromAuthorityGrid(Array.from({ length: 28 }, (_, index) => Array.from({ length: 4 }, (_, col) => read(authority.getCell(index + 2, col + 1).value)))) : {};
   data.source = path.basename(filename);
+  data.agendaWorkbook = filename;
   delete data.google.meeting;
   data.syncedAt = new Date().toISOString();
   persist(); return profile();
@@ -185,6 +216,7 @@ handle('google:pick', async kind => {
     data.meetings = meetings;
     data.authority = authority;
     data.source = file.name;
+    delete data.agendaWorkbook;
     data.syncedAt = new Date().toISOString();
   }
   if (kind === 'roster') data.roster = await google.roster(file);

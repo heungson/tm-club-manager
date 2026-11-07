@@ -10,8 +10,20 @@ const agendaColumns = ['meeting_id', 'item_id', 'position', 'type', 'included', 
 const memberColumns = ['member_id', 'display_name', 'membership_type', 'status', 'joined_on'];
 const assignmentColumns = ['meeting_id', 'role', 'member_id', 'display_name'];
 const imageColumns = ['meeting_id', 'item_id', 'drive_file_id', 'fit', 'alt_text'];
+const scheduleColumns = ['meeting_id', 'item_id', 'planned_start', 'target_finish', 'planned_minutes'];
+const scheduleTab = 'Meeting Schedule';
 const agendaSignature = rows => JSON.stringify(rows.map(row => agendaColumns.map((_, index) => String(row[index] ?? ''))).sort((a, b) => a[1].localeCompare(b[1])));
+const scheduleSignature = rows => JSON.stringify(rows.map(row => scheduleColumns.map((_, index) => String(row[index] ?? ''))).sort((a, b) => a[1].localeCompare(b[1])));
 const agendaRow = (id, item, index) => [id, item.id, index + 1, item.type, item.included ? 'TRUE' : 'FALSE', item.title, item.owner, item.ownerId, item.evaluator, item.evaluatorId, item.project, item.duration, item.notes];
+
+function scheduleRows(meeting) {
+  const rows = [];
+  if (meeting.plannedStart || meeting.targetEnd) rows.push([meeting.id, '', meeting.plannedStart || '', meeting.targetEnd || '', '']);
+  for (const item of meeting.agenda) {
+    if (item.plannedMinutes) rows.push([meeting.id, item.id, '', '', String(item.plannedMinutes)]);
+  }
+  return rows;
+}
 
 async function request(url, options = {}) {
   const response = await fetch(url, { ...options, signal: AbortSignal.timeout(25000) });
@@ -92,7 +104,13 @@ function createGoogle(vault) {
   const body = (method, value) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
   const quote = tab => `'${tab.replaceAll("'", "''")}'`;
   const base = id => `${sheets}/${encodeURIComponent(id)}`;
-  const titles = async id => (await json(`${base(id)}?fields=sheets(properties(title))`)).sheets.map(sheet => sheet.properties.title);
+  const tabs = async id => (await json(`${base(id)}?fields=sheets(properties(sheetId,title))`)).sheets.map(sheet => sheet.properties);
+  const titles = async id => (await tabs(id)).map(tab => tab.title);
+
+  async function agendaTab(file, date) {
+    const worksheets = await tabs(file.id);
+    return worksheets.find(tab => tab.title === date) || worksheets.find(tab => tab.title === 'Agenda Template');
+  }
 
   async function values(id, range, options = '') {
     return (await json(`${base(id)}/values/${encodeURIComponent(range)}${options}`)).values ?? [];
@@ -117,11 +135,18 @@ function createGoogle(vault) {
     const tabs = (await titles(file.id)).filter(name => /^\d{2}_Roles$/.test(name));
     if (!tabs.length) throw new Error('The selected workbook has no yearly roles tab such as 26_Roles.');
     const results = await Promise.all(tabs.map(async tab => fromRoleGrid(await values(file.id, `${quote(tab)}!1:52`, '?valueRenderOption=UNFORMATTED_VALUE'), tab, file.id)));
-    const [agenda, assignments, images] = await Promise.all([table(file.id, 'Agenda Items', agendaColumns), table(file.id, 'Assignment IDs', assignmentColumns), table(file.id, 'Slide Images', imageColumns)]);
+    const [agenda, assignments, images, schedule] = await Promise.all([table(file.id, 'Agenda Items', agendaColumns), table(file.id, 'Assignment IDs', assignmentColumns), table(file.id, 'Slide Images', imageColumns), table(file.id, scheduleTab, scheduleColumns)]);
     return results.flat().map(meeting => {
       const saved = agenda.filter(row => row[0] === meeting.id && row[1]);
+      const timing = schedule.filter(row => row[0] === meeting.id);
+      const meetingTime = timing.find(row => !row[1]);
+      meeting.plannedStart = meetingTime?.[2] || '';
+      meeting.targetEnd = meetingTime?.[3] || '';
+      meeting.scheduleSignature = scheduleSignature(timing);
       if (saved.length) meeting.agenda = saved.filter(row => labels[row[3]]).sort((a, b) => Number(a[2]) - Number(b[2])).map(row => ({ id: row[1], type: row[3], included: row[4] === 'TRUE', title: row[5] || '', owner: row[6] || '', ownerId: row[7] || '', evaluator: row[8] || '', evaluatorId: row[9] || '', project: row[10] || '', duration: row[11] || '', notes: row[12] || '' }));
       for (const item of meeting.agenda) {
+        const itemTime = timing.find(row => row[1] === item.id);
+        if (itemTime?.[4]) item.plannedMinutes = itemTime[4];
         const image = images.find(row => row[0] === meeting.id && row[1] === item.id && row[2]);
         if (image) item.image = { driveId: image[2], fit: image[3] || 'cover', alt: image[4] || '' };
       }
@@ -173,8 +198,26 @@ function createGoogle(vault) {
         data.push({ range: `'Assignment IDs'!A${existing < 0 ? nextRow++ : existing + 2}`, values: [[before.id, role, next.roleIds[role] || '', next.roles[role] || '']] });
       }
     }
+    const nextSchedule = scheduleRows(next);
+    let scheduleVersion = before.scheduleSignature;
+    if (scheduleSignature(nextSchedule) !== scheduleSignature(scheduleRows(before))) {
+      const schedule = await table(id, scheduleTab, scheduleColumns, true);
+      const saved = schedule.map((row, index) => ({ row, index: index + 2 })).filter(entry => entry.row[0] === before.id);
+      if (scheduleSignature(saved.map(entry => entry.row)) !== (before.scheduleSignature ?? '[]')) {
+        throw new Error('The schedule changed in Sheets. Refresh the meeting before saving.');
+      }
+      const remaining = new Map(nextSchedule.map(row => [row[1], row]));
+      for (const { row, index } of saved) {
+        const itemId = row[1] || '';
+        data.push({ range: `${quote(scheduleTab)}!A${index}`, values: [remaining.get(itemId) || Array(scheduleColumns.length).fill('')] });
+        remaining.delete(itemId);
+      }
+      let nextRow = schedule.length + 2;
+      for (const row of remaining.values()) data.push({ range: `${quote(scheduleTab)}!A${nextRow++}`, values: [row] });
+      scheduleVersion = scheduleSignature(nextSchedule);
+    }
     await write(id, data);
-    return agendaSignature(planned);
+    return { agendaSignature: agendaSignature(planned), scheduleSignature: scheduleVersion };
   }
 
   async function roster(file) {
@@ -209,7 +252,7 @@ function createGoogle(vault) {
     return { mime, bytes };
   }
 
-  return { pick, meetings, saveMeeting, roster, saveMember, authority, upload, image, disconnect() { access = null; vault.clear(); } };
+  return { pick, meetings, saveMeeting, agendaTab, roster, saveMember, authority, upload, image, disconnect() { access = null; vault.clear(); } };
 }
 
 module.exports = { createGoogle };
